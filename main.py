@@ -2,7 +2,6 @@ import os
 import requests
 import time
 import threading
-import sqlite3
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
 
@@ -19,62 +18,6 @@ if not all([ID_INSTANCE, API_TOKEN, MAX_CHAT_ID, TELEGRAM_BOT_TOKEN, TELEGRAM_CH
     missing = [v for v in ['ID_INSTANCE', 'API_TOKEN', 'MAX_CHAT_ID', 'TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID'] 
                if not os.environ.get(v)]
     raise ValueError(f"❌ Отсутствуют: {', '.join(missing)}")
-
-# ===== НАСТРОЙКА БАЗЫ ДАННЫХ SQLITE =====
-DB_FILE = 'messages.db'
-
-def init_database():
-    """Создаёт таблицу для хранения связей сообщений"""
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS message_links (
-            max_message_id TEXT PRIMARY KEY,
-            tg_message_id INTEGER NOT NULL,
-            max_chat_id TEXT NOT NULL,
-            sender_name TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    conn.commit()
-    conn.close()
-    print("🗄️ База данных SQLite инициализирована")
-
-def save_message_link(max_message_id, tg_message_id, max_chat_id, sender_name=''):
-    """Сохраняет связь между ID сообщения в Max и ID в Telegram"""
-    try:
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT OR REPLACE INTO message_links (max_message_id, tg_message_id, max_chat_id, sender_name) VALUES (?, ?, ?, ?)",
-            (str(max_message_id), tg_message_id, max_chat_id, sender_name)
-        )
-        conn.commit()
-        conn.close()
-        return True
-    except Exception as e:
-        print(f"❌ Ошибка сохранения в БД: {e}")
-        return False
-
-def get_tg_message_id(max_message_id):
-    """Получает ID сообщения в Telegram по ID из Max"""
-    try:
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT tg_message_id FROM message_links WHERE max_message_id = ?",
-            (str(max_message_id),)
-        )
-        result = cursor.fetchone()
-        conn.close()
-        return result[0] if result else None
-    except Exception as e:
-        print(f"❌ Ошибка чтения из БД: {e}")
-        return None
-
-# Инициализируем БД при старте
-init_database()
-# =========================================
 
 # ===== ВЕБ-СЕРВЕР =====
 class Handler(BaseHTTPRequestHandler):
@@ -100,7 +43,7 @@ web_thread.start()
 # =====================
 
 print("=" * 50)
-print("🚀 МОСТ MAX → TELEGRAM (С SQLITE)")
+print("🚀 МОСТ MAX → TELEGRAM (С ЦИТИРОВАНИЕМ В ТЕКСТЕ)")
 print("=" * 50)
 print(f"📱 Инстанс: {ID_INSTANCE}")
 print(f"💬 Чат MAX: {MAX_CHAT_ID}")
@@ -134,75 +77,39 @@ while True:
                     # Определяем тип сообщения
                     msg_type = message_data.get('typeMessage', '')
                     
-                    # Получаем ID сообщения в Max
-                    max_message_id = data.get('idMessage')
-                    if not max_message_id:
-                        max_message_id = str(int(time.time() * 1000))
-                    
-                    # 👇 ИЩЕМ ID ЦИТИРУЕМОГО СООБЩЕНИЯ В РАЗНЫХ МЕСТАХ
-                    quoted_id = None
-                    
-                    # Вариант 1: quotedMessage есть в корне messageData
-                    if 'quotedMessage' in message_data:
-                        quoted = message_data['quotedMessage']
-                        # ID может быть в stanzaId или idMessage
-                        quoted_id = quoted.get('stanzaId') or quoted.get('idMessage')
-                        if quoted_id:
-                            print(f"📎 Найден quotedMessage в корне, ID: {quoted_id}")
-                    
-                    # Вариант 2: для extendedTextMessage (как в документации GREEN-API) [citation:2]
-                    elif 'extendedTextMessageData' in message_data:
-                        ext_data = message_data['extendedTextMessageData']
-                        if 'stanzaId' in ext_data:
-                            quoted_id = ext_data['stanzaId']
-                            print(f"📎 Найден stanzaId в extendedTextMessageData: {quoted_id}")
-                    
-                    # Если нашли ID цитируемого сообщения, ищем его в базе
-                    reply_to_tg_id = None
-                    if quoted_id:
-                        reply_to_tg_id = get_tg_message_id(quoted_id)
-                        if reply_to_tg_id:
-                            print(f"↪️ Найден reply в Telegram: {reply_to_tg_id}")
-                        else:
-                            print(f"⚠️ Цитируемое сообщение {quoted_id} не найдено в БД")
-                    
-                    # 📝 ТЕКСТОВЫЕ СООБЩЕНИЯ
+                    # 📝 ТЕКСТОВЫЕ СООБЩЕНИЯ (С ЦИТИРОВАНИЕМ)
                     if msg_type == 'textMessage' and 'textMessageData' in message_data:
                         text = message_data['textMessageData'].get('textMessage')
                         if text:
                             sender_name = sender_data.get('senderName', 'Неизвестно')
                             
+                            # 👇 ПРОВЕРЯЕМ, ЕСТЬ ЛИ ОТВЕТ НА СООБЩЕНИЕ
+                            reply_text = ""
+                            if 'quotedMessage' in message_data:
+                                quoted = message_data['quotedMessage']
+                                quoted_text = quoted.get('textMessage', '')
+                                quoted_sender = quoted.get('senderName', 'кто-то')
+                                if quoted_text:
+                                    reply_text = f"↪️ <b>В ответ на</b> сообщение от {quoted_sender}:\n> {quoted_text[:100]}{'...' if len(quoted_text) > 100 else ''}\n\n"
+                            
                             print(f"👤 От: {sender_name}")
                             print(f"📝 Текст: {text}")
+                            if reply_text:
+                                print(f"↪️ Ответ на: {quoted_text[:50]}...")
                             
                             # Формируем сообщение для Telegram
-                            full_message = f"📨 <b>MAX от {sender_name}:</b>\n{text}"
+                            full_message = f"{reply_text}📨 <b>MAX от {sender_name}:</b>\n{text}"
                             
-                            # Отправляем в Telegram
                             tg_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
                             tg_data = {
                                 "chat_id": TELEGRAM_CHAT_ID,
                                 "text": full_message,
                                 "parse_mode": "HTML"
                             }
-                            
-                            # Если есть ID сообщения, на которое отвечаем, добавляем reply_parameters [citation:4][citation:10]
-                            if reply_to_tg_id:
-                                tg_data["reply_parameters"] = {
-                                    "message_id": reply_to_tg_id
-                                }
-                                print(f"↪️ Отправляется как ответ на сообщение {reply_to_tg_id}")
-                            
-                            tg_response = requests.post(tg_url, json=tg_data)
-                            
-                            if tg_response.status_code == 200:
-                                tg_message_id = tg_response.json()['result']['message_id']
-                                save_message_link(max_message_id, tg_message_id, chat_id, sender_name)
-                                print("✅ Текст отправлен в Telegram!")
-                            else:
-                                print(f"❌ Ошибка Telegram: {tg_response.text}")
+                            requests.post(tg_url, json=tg_data)
+                            print("✅ Текст отправлен в Telegram!")
                     
-                    # 🖼️ МЕДИА СООБЩЕНИЯ
+                    # 🖼️ МЕДИА СООБЩЕНИЯ (ФОТО, ВИДЕО, ДОКУМЕНТЫ)
                     elif msg_type in ['imageMessage', 'videoMessage', 'documentMessage', 'audioMessage']:
                         file_data = message_data.get('fileMessageData', {})
                         download_url = file_data.get('downloadUrl')
@@ -221,44 +128,47 @@ while True:
                             print(f"👤 От: {sender_name}")
                             print(f"{file_type}: {file_name}")
                             
+                            # Проверяем, есть ли ответ на сообщение (для медиа)
+                            reply_text = ""
+                            if 'quotedMessage' in message_data:
+                                quoted = message_data['quotedMessage']
+                                quoted_text = quoted.get('textMessage', '')
+                                quoted_sender = quoted.get('senderName', 'кто-то')
+                                if quoted_text:
+                                    reply_text = f"↪️ <b>В ответ на</b> сообщение от {quoted_sender}:\n> {quoted_text[:100]}{'...' if len(quoted_text) > 100 else ''}\n\n"
+                            
                             # Скачиваем файл
                             file_response = requests.get(download_url)
                             
                             if file_response.status_code == 200:
-                                # Отправляем в Telegram
-                                full_caption = f"📨 MAX от {sender_name}"
-                                if caption:
-                                    full_caption += f"\n{caption}"
-                                
+                                # Отправляем в Telegram как фото (если это изображение)
                                 if msg_type == 'imageMessage':
                                     tg_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
                                     files = {'photo': (file_name, file_response.content)}
+                                    full_caption = f"{reply_text}📨 MAX от {sender_name}"
+                                    if caption:
+                                        full_caption += f"\n{caption}"
                                     data = {
                                         'chat_id': TELEGRAM_CHAT_ID,
                                         'caption': full_caption,
                                         'parse_mode': 'HTML'
                                     }
-                                    if reply_to_tg_id:
-                                        data["reply_parameters"] = {"message_id": reply_to_tg_id}
-                                    tg_response = requests.post(tg_url, data=data, files=files)
+                                    requests.post(tg_url, data=data, files=files)
+                                    print("✅ Фото отправлено в Telegram!")
                                 else:
+                                    # Для видео/документов/аудио отправляем как документ
                                     tg_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
                                     files = {'document': (file_name, file_response.content)}
+                                    full_caption = f"{reply_text}📨 MAX от {sender_name}\n{file_type}"
+                                    if caption:
+                                        full_caption += f"\n{caption}"
                                     data = {
                                         'chat_id': TELEGRAM_CHAT_ID,
-                                        'caption': f"{full_caption}\n{file_type}",
+                                        'caption': full_caption,
                                         'parse_mode': 'HTML'
                                     }
-                                    if reply_to_tg_id:
-                                        data["reply_parameters"] = {"message_id": reply_to_tg_id}
-                                    tg_response = requests.post(tg_url, data=data, files=files)
-                                
-                                if tg_response.status_code == 200:
-                                    tg_message_id = tg_response.json()['result']['message_id']
-                                    save_message_link(max_message_id, tg_message_id, chat_id, sender_name)
+                                    requests.post(tg_url, data=data, files=files)
                                     print(f"✅ {file_type} отправлен в Telegram!")
-                                else:
-                                    print(f"❌ Ошибка отправки: {tg_response.text}")
                             else:
                                 print(f"❌ Не удалось скачать файл")
                         else:
