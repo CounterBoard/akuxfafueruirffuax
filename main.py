@@ -25,6 +25,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"Bridge is running")
+    
+    def do_HEAD(self):
+        self.send_response(200)
+        self.end_headers()
+        
     def log_message(self, format, *args): pass
 
 def run_http_server():
@@ -107,3 +112,4 @@ while True:
         time.sleep(5)
     
     time.sleep(1)
+
