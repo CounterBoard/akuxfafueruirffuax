@@ -134,24 +134,43 @@ while True:
                     # Определяем тип сообщения
                     msg_type = message_data.get('typeMessage', '')
                     
-                    # Получаем ID сообщения в Max (если есть)
-                    max_message_id = data.get('idMessage') or str(int(time.time() * 1000))
+                    # Получаем ID сообщения в Max
+                    max_message_id = data.get('idMessage')
+                    if not max_message_id:
+                        max_message_id = str(int(time.time() * 1000))
                     
-                    # 📝 ТЕКСТОВЫЕ СООБЩЕНИЯ (С ПОДДЕРЖКОЙ ОТВЕТОВ)
+                    # 👇 ИЩЕМ ID ЦИТИРУЕМОГО СООБЩЕНИЯ В РАЗНЫХ МЕСТАХ
+                    quoted_id = None
+                    
+                    # Вариант 1: quotedMessage есть в корне messageData
+                    if 'quotedMessage' in message_data:
+                        quoted = message_data['quotedMessage']
+                        # ID может быть в stanzaId или idMessage
+                        quoted_id = quoted.get('stanzaId') or quoted.get('idMessage')
+                        if quoted_id:
+                            print(f"📎 Найден quotedMessage в корне, ID: {quoted_id}")
+                    
+                    # Вариант 2: для extendedTextMessage (как в документации GREEN-API) [citation:2]
+                    elif 'extendedTextMessageData' in message_data:
+                        ext_data = message_data['extendedTextMessageData']
+                        if 'stanzaId' in ext_data:
+                            quoted_id = ext_data['stanzaId']
+                            print(f"📎 Найден stanzaId в extendedTextMessageData: {quoted_id}")
+                    
+                    # Если нашли ID цитируемого сообщения, ищем его в базе
+                    reply_to_tg_id = None
+                    if quoted_id:
+                        reply_to_tg_id = get_tg_message_id(quoted_id)
+                        if reply_to_tg_id:
+                            print(f"↪️ Найден reply в Telegram: {reply_to_tg_id}")
+                        else:
+                            print(f"⚠️ Цитируемое сообщение {quoted_id} не найдено в БД")
+                    
+                    # 📝 ТЕКСТОВЫЕ СООБЩЕНИЯ
                     if msg_type == 'textMessage' and 'textMessageData' in message_data:
                         text = message_data['textMessageData'].get('textMessage')
                         if text:
                             sender_name = sender_data.get('senderName', 'Неизвестно')
-                            
-                            # Проверяем, есть ли ответ на сообщение
-                            reply_to_tg_id = None
-                            if 'quotedMessage' in message_data:
-                                quoted = message_data['quotedMessage']
-                                quoted_id = quoted.get('idMessage')
-                                if quoted_id:
-                                    reply_to_tg_id = get_tg_message_id(quoted_id)
-                                    if reply_to_tg_id:
-                                        print(f"↪️ Это ответ на сообщение {quoted_id}")
                             
                             print(f"👤 От: {sender_name}")
                             print(f"📝 Текст: {text}")
@@ -167,7 +186,7 @@ while True:
                                 "parse_mode": "HTML"
                             }
                             
-                            # Если есть ID сообщения, на которое отвечаем, добавляем reply_parameters
+                            # Если есть ID сообщения, на которое отвечаем, добавляем reply_parameters [citation:4][citation:10]
                             if reply_to_tg_id:
                                 tg_data["reply_parameters"] = {
                                     "message_id": reply_to_tg_id
@@ -183,7 +202,7 @@ while True:
                             else:
                                 print(f"❌ Ошибка Telegram: {tg_response.text}")
                     
-                    # 🖼️ МЕДИА СООБЩЕНИЯ (ФОТО, ВИДЕО, ДОКУМЕНТЫ)
+                    # 🖼️ МЕДИА СООБЩЕНИЯ
                     elif msg_type in ['imageMessage', 'videoMessage', 'documentMessage', 'audioMessage']:
                         file_data = message_data.get('fileMessageData', {})
                         download_url = file_data.get('downloadUrl')
@@ -201,14 +220,6 @@ while True:
                             
                             print(f"👤 От: {sender_name}")
                             print(f"{file_type}: {file_name}")
-                            
-                            # Проверяем, есть ли ответ на сообщение
-                            reply_to_tg_id = None
-                            if 'quotedMessage' in message_data:
-                                quoted = message_data['quotedMessage']
-                                quoted_id = quoted.get('idMessage')
-                                if quoted_id:
-                                    reply_to_tg_id = get_tg_message_id(quoted_id)
                             
                             # Скачиваем файл
                             file_response = requests.get(download_url)
