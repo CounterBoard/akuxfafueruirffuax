@@ -43,7 +43,7 @@ web_thread.start()
 # =====================
 
 print("=" * 50)
-print("🚀 МОСТ MAX → TELEGRAM (С ФОТО)")
+print("🚀 МОСТ MAX → TELEGRAM (С ОТВЕТАМИ)")
 print("=" * 50)
 print(f"📱 Инстанс: {ID_INSTANCE}")
 print(f"💬 Чат MAX: {MAX_CHAT_ID}")
@@ -74,6 +74,20 @@ while True:
                 if chat_id == MAX_CHAT_ID:
                     print("✅ Сообщение из нужного чата!")
                     
+                    # 👇 ОПРЕДЕЛЯЕМ, ЕСТЬ ЛИ ОТВЕТ (ТОЛЬКО ЭТО ДОБАВЛЕНО)
+                    reply_info = ""
+                    if 'quotedMessage' in message_data:
+                        quoted = message_data['quotedMessage']
+                        quoted_text = quoted.get('textMessage', '')
+                        quoted_sender = quoted.get('senderName', '')
+                        
+                        if quoted_text:
+                            if quoted_sender:
+                                reply_info = f"↪️ В ответ на {quoted_sender}:\n> {quoted_text}\n\n"
+                            else:
+                                reply_info = f"↪️ В ответ на сообщение:\n> {quoted_text}\n\n"
+                            print(f"↪️ Это ответ на: {quoted_text[:50]}...")
+                    
                     # Определяем тип сообщения
                     msg_type = message_data.get('typeMessage', '')
                     
@@ -82,18 +96,23 @@ while True:
                         text = message_data['textMessageData'].get('textMessage')
                         if text:
                             sender_name = sender_data.get('senderName', 'Неизвестно')
+                            
                             print(f"👤 От: {sender_name}")
                             print(f"📝 Текст: {text}")
                             
+                            # 👇 ДОБАВЛЯЕМ ОТВЕТ В СООБЩЕНИЕ
+                            full_message = f"{reply_info}📨 MAX от {sender_name}:\n{text}"
+                            
+                            # Отправляем в Telegram
                             tg_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
                             tg_data = {
                                 "chat_id": TELEGRAM_CHAT_ID,
-                                "text": f"📨 MAX от {sender_name}:\n{text}"
+                                "text": full_message
                             }
                             requests.post(tg_url, json=tg_data)
                             print("✅ Текст отправлен в Telegram!")
                     
-                    # 🖼️ МЕДИА СООБЩЕНИЯ (ФОТО, ВИДЕО, ДОКУМЕНТЫ)
+                    # 🖼️ МЕДИА СООБЩЕНИЯ
                     elif msg_type in ['imageMessage', 'videoMessage', 'documentMessage', 'audioMessage']:
                         file_data = message_data.get('fileMessageData', {})
                         download_url = file_data.get('downloadUrl')
@@ -116,23 +135,26 @@ while True:
                             file_response = requests.get(download_url)
                             
                             if file_response.status_code == 200:
-                                # Отправляем в Telegram как фото (если это изображение)
+                                # 👇 ДОБАВЛЯЕМ ОТВЕТ В ПОДПИСЬ
+                                full_caption = f"{reply_info}📨 MAX от {sender_name}"
+                                if caption:
+                                    full_caption += f"\n{caption}"
+                                
                                 if msg_type == 'imageMessage':
                                     tg_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
                                     files = {'photo': (file_name, file_response.content)}
                                     data = {
                                         'chat_id': TELEGRAM_CHAT_ID,
-                                        'caption': f"📨 MAX от {sender_name}\n{caption}" if caption else f"📨 MAX от {sender_name}"
+                                        'caption': full_caption
                                     }
                                     requests.post(tg_url, data=data, files=files)
                                     print("✅ Фото отправлено в Telegram!")
                                 else:
-                                    # Для видео/документов/аудио отправляем как документ
                                     tg_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
                                     files = {'document': (file_name, file_response.content)}
                                     data = {
                                         'chat_id': TELEGRAM_CHAT_ID,
-                                        'caption': f"📨 MAX от {sender_name}\n{file_type}\n{caption}" if caption else f"📨 MAX от {sender_name}\n{file_type}"
+                                        'caption': full_caption
                                     }
                                     requests.post(tg_url, data=data, files=files)
                                     print(f"✅ {file_type} отправлен в Telegram!")
