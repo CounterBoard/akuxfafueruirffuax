@@ -2,6 +2,7 @@ import os
 import requests
 import time
 import threading
+import json
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
 
@@ -19,6 +20,68 @@ if not all([ID_INSTANCE, API_TOKEN, MAX_CHAT_ID, TELEGRAM_BOT_TOKEN, TELEGRAM_CH
                if not os.environ.get(v)]
     raise ValueError(f"❌ Отсутствуют: {', '.join(missing)}")
 
+# ===== ФУНКЦИЯ ДЛЯ ПОЛУЧЕНИЯ ИСТОРИИ =====
+def get_chat_history(count=10):
+    """Получает последние count сообщений из чата Max"""
+    url = f"https://api.green-api.com/waInstance{ID_INSTANCE}/GetChatHistory/{API_TOKEN}"
+    payload = {
+        "chatId": MAX_CHAT_ID,
+        "count": min(count, 100)
+    }
+    try:
+        response = requests.post(url, json=payload, timeout=10)
+        if response.status_code == 200:
+            return response.json()
+        else:
+            print(f"❌ Ошибка получения истории: {response.status_code}")
+            return None
+    except Exception as e:
+        print(f"❌ Ошибка получения истории: {e}")
+        return None
+
+def send_history_to_telegram(chat_id, count=10):
+    """Отправляет историю сообщений в Telegram (новые сообщения внизу)"""
+    history = get_chat_history(count)
+    
+    if not history or len(history) == 0:
+        tg_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        data = {
+            "chat_id": chat_id,
+            "text": "📭 Нет сообщений в истории"
+        }
+        requests.post(tg_url, json=data)
+        return
+    
+    messages = []
+    # ✅ ПЕРЕВОРАЧИВАЕМ СПИСОК, чтобы новые сообщения были внизу
+    for msg in reversed(history[:count]):
+        msg_type = msg.get('type', '')
+        sender = msg.get('senderName', 'Неизвестно')
+        text = msg.get('textMessage', '')
+        timestamp = msg.get('timestamp', 0)
+        
+        time_str = datetime.fromtimestamp(timestamp).strftime('%H:%M %d.%m')
+        arrow = '📥' if msg_type == 'incoming' else '📤'
+        
+        if len(text) > 100:
+            text = text[:100] + '...'
+        
+        messages.append(f"{arrow} [{time_str}] {sender}:\n{text}")
+    
+    full_text = f"📜 **История чата (последние {len(messages)}):**\n\n" + "\n\n".join(messages)
+    
+    if len(full_text) > 4000:
+        full_text = full_text[:4000] + "...\n\n(сообщение обрезано)"
+    
+    tg_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    data = {
+        "chat_id": chat_id,
+        "text": full_text,
+        "parse_mode": "Markdown"
+    }
+    requests.post(tg_url, json=data)
+    print(f"📜 История из {count} сообщений отправлена в Telegram")
+
 # ===== ВЕБ-СЕРВЕР =====
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -29,7 +92,34 @@ class Handler(BaseHTTPRequestHandler):
     def do_HEAD(self):
         self.send_response(200)
         self.end_headers()
+    
+    def do_POST(self):
+        content_length = int(self.headers.get('Content-Length', 0))
+        post_data = self.rfile.read(content_length)
         
+        try:
+            update = json.loads(post_data)
+            
+            if 'message' in update and 'text' in update['message']:
+                text = update['message']['text']
+                chat_id = update['message']['chat']['id']
+                
+                if str(chat_id) == str(TELEGRAM_CHAT_ID):
+                    if text.startswith('/h'):
+                        parts = text.split()
+                        count = 10
+                        if len(parts) > 1 and parts[1].isdigit():
+                            count = int(parts[1])
+                        
+                        print(f"📨 Получена команда /h с параметром {count}")
+                        send_history_to_telegram(chat_id, count)
+        except Exception as e:
+            print(f"❌ Ошибка обработки команды: {e}")
+        
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+    
     def log_message(self, format, *args): pass
 
 def run_http_server():
@@ -43,13 +133,14 @@ web_thread.start()
 # =====================
 
 print("=" * 50)
-print("🚀 МОСТ MAX → TELEGRAM (С ОТВЕТАМИ)")
+print("🚀 МОСТ MAX → TELEGRAM (С ИСТОРИЕЙ /h)")
 print("=" * 50)
 print(f"📱 Инстанс: {ID_INSTANCE}")
 print(f"💬 Чат MAX: {MAX_CHAT_ID}")
 print(f"📬 Чат Telegram: {TELEGRAM_CHAT_ID}")
 print("=" * 50)
-print("🟢 Запущено. Жду сообщения...\n")
+print("🟢 Запущено. Жду сообщения...")
+print("📝 Команды: /h - последние 10 сообщений, /h 5 - последние 5 сообщений\n")
 
 receive_url = f"https://api.green-api.com/waInstance{ID_INSTANCE}/receiveNotification/{API_TOKEN}"
 
@@ -74,36 +165,28 @@ while True:
                 if chat_id == MAX_CHAT_ID:
                     print("✅ Сообщение из нужного чата!")
                     
-                    # 👇 ОПРЕДЕЛЯЕМ, ЕСТЬ ЛИ ОТВЕТ (ТОЛЬКО ЭТО ДОБАВЛЕНО)
                     reply_info = ""
                     if 'quotedMessage' in message_data:
                         quoted = message_data['quotedMessage']
                         quoted_text = quoted.get('textMessage', '')
                         quoted_sender = quoted.get('senderName', '')
-                        
                         if quoted_text:
                             if quoted_sender:
                                 reply_info = f"↪️ В ответ на {quoted_sender}:\n> {quoted_text}\n\n"
                             else:
                                 reply_info = f"↪️ В ответ на сообщение:\n> {quoted_text}\n\n"
-                            print(f"↪️ Это ответ на: {quoted_text[:50]}...")
                     
-                    # Определяем тип сообщения
+                    sender_name = sender_data.get('senderName', 'Неизвестно')
                     msg_type = message_data.get('typeMessage', '')
                     
-                    # 📝 ТЕКСТОВЫЕ СООБЩЕНИЯ
                     if msg_type == 'textMessage' and 'textMessageData' in message_data:
                         text = message_data['textMessageData'].get('textMessage')
                         if text:
-                            sender_name = sender_data.get('senderName', 'Неизвестно')
-                            
                             print(f"👤 От: {sender_name}")
                             print(f"📝 Текст: {text}")
                             
-                            # 👇 ДОБАВЛЯЕМ ОТВЕТ В СООБЩЕНИЕ
                             full_message = f"{reply_info}📨 MAX от {sender_name}:\n{text}"
                             
-                            # Отправляем в Telegram
                             tg_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
                             tg_data = {
                                 "chat_id": TELEGRAM_CHAT_ID,
@@ -112,7 +195,6 @@ while True:
                             requests.post(tg_url, json=tg_data)
                             print("✅ Текст отправлен в Telegram!")
                     
-                    # 🖼️ МЕДИА СООБЩЕНИЯ
                     elif msg_type in ['imageMessage', 'videoMessage', 'documentMessage', 'audioMessage']:
                         file_data = message_data.get('fileMessageData', {})
                         download_url = file_data.get('downloadUrl')
@@ -120,7 +202,6 @@ while True:
                         file_name = file_data.get('fileName', 'media')
                         
                         if download_url:
-                            sender_name = sender_data.get('senderName', 'Неизвестно')
                             file_type = {
                                 'imageMessage': '🖼️ Фото',
                                 'videoMessage': '🎥 Видео',
@@ -131,11 +212,9 @@ while True:
                             print(f"👤 От: {sender_name}")
                             print(f"{file_type}: {file_name}")
                             
-                            # Скачиваем файл
                             file_response = requests.get(download_url)
                             
                             if file_response.status_code == 200:
-                                # 👇 ДОБАВЛЯЕМ ОТВЕТ В ПОДПИСЬ
                                 full_caption = f"{reply_info}📨 MAX от {sender_name}"
                                 if caption:
                                     full_caption += f"\n{caption}"
@@ -167,7 +246,6 @@ while True:
                 else:
                     print(f"⏭️ Не тот чат (жду {MAX_CHAT_ID})")
                 
-                # Удаляем уведомление
                 delete_url = f"https://api.green-api.com/waInstance{ID_INSTANCE}/deleteNotification/{API_TOKEN}/{receipt_id}"
                 requests.delete(delete_url)
                 print("🗑️ Уведомление удалено")
